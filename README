@@ -1,0 +1,127 @@
+NAME
+    what-i-did - Track what you did
+
+DESCRIPTION
+    This tool supports you in efficiently tracking what you did (if that
+    matters for you). For example if you do work you are payed for by
+    time what-i-did helps you keeping track of your work.
+
+    Once started just an icon appears in your toolbar. Click on it
+    to get an input field and enter what you are doing now. If you
+    often switch between different projects just enter its name at
+    first, delimited by a colon, and then what you're doing in detail:
+    
+      what-i-did: writing README
+    
+    what-i-did notes your input together with a timestamp into a
+    simple text file you may edit by hand every time. what-i-did
+    urges you to nothing, it just tries to support you in a simply
+    and subtle fashion.
+    
+    The text box has context sensitive searching abilities. Once you
+    start typing a popup appears with matching items of your what-i-did
+    history. Before you start typing a list with the latest popular
+    items pops up immediately. Just pick on by mouse and you're done.
+    
+    Later it comes to summing up the time you needed for specific
+    projects. By right clicking the what-i-did icon a menu pops up.
+    Choose "Sum up times..." to open the correspondent dialog.
+    
+    You get a list view of all activites in the what-i-did log. Select
+    all items you want to sum up as one entry. what-i-did calculates
+    the exact amount of time for you and combines all your comments
+    into one line, optionally omitting the project tag (can be
+    configured in the Preferences menu). Copy these items to your
+    invoice sheet (e.g. OpenOffice Calc or similar). what-i-did does
+    not generate full reports, for this task use an external application
+    which does this job better. Because the requirements for this are
+    very specific what-i-did doesn't cover this (yet).
+
+REQUIRES
+    Perl & the following Perl modules:
+    - Gtk2
+    - Locale::TextDomain
+
+INSTALLATION
+    sudo cp what-i-did /usr/local/bin
+
+FILES
+    ~/what-i-did.txt
+        Default filename of the what-i-did activity logfile. You
+        may edit it by hand, but keep the time formatting intact!
+
+    ~/.config/what-i-did/settings.conf
+        Your configuration settings. You may edit this file but
+        better use the configuration submenu of the status icon.
+        
+        To customise the text snippets of the default activity
+        icons just edit the "item-text-*" keys here. They are
+        currently not available via the configuration menu.
+
+    ~/.config/what-i-did/.data/gfx/*.png
+        Icon files shipped with what-i-did. If you like to customise
+        these, just place your version in ~/.config/what-i-did/
+
+    ~/.config/what-i-did/*.png
+        Your customised icon files.
+
+SYNOPSIS
+    what-i-did [options]
+
+    Options:                         
+      --once    Just show the activity entry one time. Useful in
+                conjunction with a desktop environment shortcut.
+
+      --add=<text>                   
+                Just add the given text to the log file and exit
+                (no GUI).
+                                 
+      --sum     Just show the sum-up dialog one time. Can't be used
+                together with --once.         
+                                 
+      --file=<filename>              
+                Name of the log file for the recorded activities.
+                                 
+                Default: $HOME/what-i-did.txt
+                                 
+      --show-cmd=<editor>            
+                Name of the editor program to show the activity log text
+                file. Filename is appended automatically unless a {file}
+                placeholder is found.
+                                 
+                Default: nc          
+                                 
+      --help    Show this help text. 
+
+LOCALISATION
+    English
+    German
+    
+    If you like to translate what-i-did to your language, just
+    contact us by mail.
+
+AUTHORS
+    Jörn Reder <joern at zyn dot de> (Main developer)
+    Gert Brinkmann <g111 at netcologne dot de> (KDE support)
+
+BUG REPORTS TO
+    Jörn Reder <joern at zyn dot de>
+
+COPYRIGHT AND LICENSE
+    Copyright 2008-2009 by Jörn Reder.
+
+    This library is free software; you can redistribute it and/or modify it
+    under the terms of the GNU Library General Public License as published
+    by the Free Software Foundation; either version 2.1 of the License, or
+    (at your option) any later version.
+
+    This library is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Library
+    General Public License for more details.
+
+    You should have received a copy of the GNU Library General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307
+    USA.
+  

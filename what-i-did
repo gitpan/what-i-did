@@ -1,0 +1,2095 @@
+#!/usr/bin/perl
+
+# $Id: what-i-did,v 1.15 2009-12-13 12:32:00 joern Exp $
+
+use strict;
+
+$WhatIdid::VERSION = "1.0.9";
+
+#---------------------------------------------------------------------------
+# Unpack embedded resource files
+#---------------------------------------------------------------------------
+
+use MIME::Base64;
+use File::Path;
+use File::Basename;
+use FindBin;
+
+my $CONFIG_DIR;
+BEGIN {
+    $CONFIG_DIR = "$ENV{HOME}/.config";
+    my $dir = $CONFIG_DIR;
+    if ( not -d $dir ) { mkdir $dir, 0775 or die "can't mkdir $dir" }
+    $dir = "$dir/what-i-did";
+    if ( not -d $dir ) { mkdir $dir, 0775 or die "can't mkdir $dir" }
+    $dir = "$dir/.data";
+    if ( not -d $dir ) { mkdir $dir, 0775 or die "can't mkdir $dir" }    
+    open (my $fh, "<", "$FindBin::Bin/$FindBin::Script")
+        or die "can't read $FindBin::Bin/$FindBin::Script";
+    my ($name, $buffer, $in_data);
+    while (<$fh>) {
+        $in_data = 1,next if /^__DATA__/;
+        next unless $in_data;
+        if ( /^\%File:\s+(.*)/ ) { $name = $1; $buffer = "";  next }
+        if ( /^\%End/ ) {
+            my $filename = "$dir/$name";
+            my $file_dir = dirname($filename);
+            if ( not -d $file_dir ) {
+                mkpath ([$file_dir],0,0755) or die "can't mkpath '$file_dir'"
+            }
+            open (my $fh, ">", $filename) or die "can't write $filename";
+            print $fh MIME::Base64::decode($buffer);
+            close $fh;
+            next;
+        }
+        $buffer .= $_;
+    }
+    close $fh;
+}
+
+#---------------------------------------------------------------------------
+# Load libraries
+#---------------------------------------------------------------------------
+
+use lib ( "$CONFIG_DIR/what-i-did/.data/lib" );
+use Locale::TextDomain qw/what-i-did/;
+use Getopt::Long;
+
+#---------------------------------------------------------------------------
+# Usage
+#---------------------------------------------------------------------------
+
+my $USAGE =
+__(q[Usage: what-i-did [options]
+
+Options:
+  --once    Just show the activity entry one time. Useful in conjunction
+            with a desktop environment shortcut.
+
+  --add=<text>
+            Just add the given text to the log file and exit (no GUI).
+
+  --sum     Just show the sum-up dialog one time. Can't be used together
+            with --once.
+
+  --file=<filename>
+            Name of the log file for the recorded activities.
+              
+            Default: $HOME/what-i-did.txt
+
+  --show-cmd=<editor>
+            Name of the editor program to show the activity log text
+            file. Filename is appended automatically unless a {file}
+            placeholder is found.
+              
+            Default: nc
+
+  --help    Show this help text.
+
+]);
+
+#---------------------------------------------------------------------------
+# Main program
+#---------------------------------------------------------------------------
+
+main: {
+    my $filename = "$ENV{HOME}/what-i-did.txt";
+    my $show_cmd = 'nc';
+    my $once     = 0;
+    my $sum_up   = 0;
+    my $help     = 0;
+    my $add_text = "";
+
+    my $ok = GetOptions (
+        "file=s"     => \$filename,
+        "show-cmd=s" => \$show_cmd,
+        "add=s"      => \$add_text,
+        "once"       => \$once,
+        "sum"        => \$sum_up,
+        "help"       => \$help,
+    );
+
+    usage() unless $ok;
+    usage() if $help;
+    usage() if $once and $sum_up;
+
+    my $wid = WhatIdid->new(
+        config_dir  => $CONFIG_DIR,
+        filename    => $filename,
+        show_cmd    => $show_cmd,
+        once        => $once,
+        sum_up      => $sum_up,
+        no_gui      => ($add_text ne ''),
+    );
+
+    $wid->init;
+
+    if ( $add_text ne '' ) {
+        $wid->add_wid_entry($add_text);
+    }
+    else {
+        $wid->start;
+    }
+}
+
+sub usage {
+    print $USAGE;
+    exit 1;
+}
+
+#---------------------------------------------------------------------------
+# Main module
+#---------------------------------------------------------------------------
+
+package WhatIdid;
+
+use Time::Local;
+use Data::Dumper;
+use File::Basename;
+use Locale::TextDomain qw/what-i-did/;
+
+use constant {
+    #-- Column indices of the in memory wid list for summing up
+    DATE    => 0,
+    TIME    => 1,
+    ICON    => 2,
+    DESC    => 3,
+    SECS    => 4,
+    
+    #-- Automatic text entries for program start and exit
+    PROGRAM_START   => __"Program start",
+    PROGRAM_EXIT    => __"Program exit",
+};
+
+#---------------------------------------------------------------------------
+# Attributes
+#---------------------------------------------------------------------------
+
+sub get_filename                { shift->{filename}                     }
+sub get_show_cmd                { shift->{show_cmd}                     }
+sub get_once                    { shift->{once}                         }
+sub get_sum_up                  { shift->{sum_up}                       }
+sub get_no_gui                  { shift->{no_gui}                       }
+sub get_status_icon             { shift->{status_icon}                  }
+sub get_menu                    { shift->{menu}                         }
+sub get_entry                   { shift->{entry}                        }
+sub get_entry_window            { shift->{entry_window}                 }
+sub get_cmp_model               { shift->{cmp_model}                    }
+sub get_top_items_slist         { shift->{top_items_slist}              }
+sub get_top_items_window        { shift->{top_items_window}             }
+sub get_sum_up_window           { shift->{sum_up_window}                }
+sub get_sum_up_slist            { shift->{sum_up_slist}                 }
+sub get_sum_up_entry            { shift->{sum_up_entry}                 }
+sub get_sum_info_entry          { shift->{sum_info_entry}               }
+sub get_sum_up_minutes_label    { shift->{sum_up_minutes_label}         }
+sub get_sum_removed_entries     { shift->{sum_removed_entries}          }
+sub get_in_sum_up               { shift->{in_sum_up}                    }
+sub get_standard_texts          { shift->{standard_texts}               }
+sub get_standard_items          { shift->{standard_items}               }
+sub get_icon_pixbufs            { shift->{icon_pixbufs}                 }
+sub get_last_wid_file_size      { shift->{last_wid_file_size}           }
+sub get_gtk_tips                { shift->{gtk_tips}                     }
+sub get_screen_idle_time        { shift->{screen_idle_time}             }
+sub get_screen_monitor_pid      { shift->{screen_monitor_pid}           }
+sub get_settings                { shift->{settings}                     }
+sub get_settings_dir            { shift->{settings_dir}                 }
+sub get_settings_file           { shift->{settings_file}                }
+sub get_alive_file              { shift->{alive_file}                   }
+
+#---------------------------------------------------------------------------
+
+sub set_filename                { shift->{filename}             = $_[1] }
+sub set_show_cmd                { shift->{show_cmd}             = $_[1] }
+sub set_once                    { shift->{once}                 = $_[1] }
+sub set_sum_up                  { shift->{sum_up}               = $_[1] }
+sub set_no_gui                  { shift->{no_gui}               = $_[1] }
+sub set_status_icon             { shift->{status_icon}          = $_[1] }
+sub set_menu                    { shift->{menu}                 = $_[1] }
+sub set_entry                   { shift->{entry}                = $_[1] }
+sub set_entry_window            { shift->{entry_window}         = $_[1] }
+sub set_cmp_model               { shift->{cmp_model}            = $_[1] }
+sub set_top_items_slist         { shift->{top_items_slist}      = $_[1] }
+sub set_top_items_window        { shift->{top_items_window}     = $_[1] }
+sub set_sum_up_window           { shift->{sum_up_window}        = $_[1] }
+sub set_sum_up_slist            { shift->{sum_up_slist}         = $_[1] }
+sub set_sum_up_entry            { shift->{sum_up_entry}         = $_[1] }
+sub set_sum_up_minutes_label    { shift->{sum_up_minutes_label} = $_[1] }
+sub set_sum_info_entry          { shift->{sum_info_entry}       = $_[1] }
+sub set_sum_removed_entries     { shift->{sum_removed_entries}  = $_[1] }
+sub set_in_sum_up               { shift->{in_sum_up}            = $_[1] }
+sub set_standard_items          { shift->{standard_items}       = $_[1] }
+sub set_standard_texts          { shift->{standard_texts}       = $_[1] }
+sub set_icon_pixbufs            { shift->{icon_pixbufs}         = $_[1] }
+sub set_last_wid_file_size      { shift->{last_wid_file_size}   = $_[1] }
+sub set_gtk_tips                { shift->{gtk_tips}             = $_[1] }
+sub set_screen_idle_time        { shift->{screen_idle_time}     = $_[1] }
+sub set_screen_monitor_pid      { shift->{screen_monitor_pid}   = $_[1] }
+sub set_settings                { shift->{settings}             = $_[1] }
+sub set_settings_dir            { shift->{settings_dir}         = $_[1] }
+sub set_settings_file           { shift->{settings_file}        = $_[1] }
+sub set_alive_file              { shift->{alive_file}           = $_[1] }
+
+#---------------------------------------------------------------------------
+# Constructor
+#---------------------------------------------------------------------------
+
+sub new {
+    my $class = shift;
+    my %par = @_;
+    my  ($config_dir, $filename, $show_cmd, $once, $sum_up, $no_gui) =
+    @par{'config_dir','filename','show_cmd','once','sum_up','no_gui'};
+    
+    my $self = bless {
+        filename            => $filename,
+        show_cmd            => $show_cmd,
+        once                => $once,
+        sum_up              => $sum_up,
+        no_gui              => $no_gui,
+        sum_removed_entries => {},
+
+        settings => {
+            "auto-multi-select"             => 1,
+            "auto-multi-select-fuzzy"       => 1,
+            "show-top-items-window"         => 1,
+            "hide-top-items-window-on-edit" => 1,
+            "top-items-window-cnt"          => 16,
+            "round-up-summary"              => 1,
+
+            "entry-window-width"            => 450,
+            "top-items-window-width"        => 200,
+
+            "set-skip-marker-after-sum-up"  => 1,
+            "remove-prefix-from-text"       => 1,
+
+            "monitor-screensaver"           => 1,
+            "log-program-start-exit"        => 1,
+
+            "item-text-finished"            => __"Finished",
+            "item-text-day-start"           => __"Good morning",
+            "item-text-day-end"             => __"Bye bye",
+            "item-text-lunch-time"          => __"Lunch time",
+            "item-text-phone"               => __"Phone call:",
+        },
+        
+        standard_items      => {},  # item-name => Text
+        standard_texts      => {},  # Text      => item-name (reverse of standard_items)
+        
+        icon_pixbufs        => {},
+
+        screen_active_time  => time,
+        screen_idle_time    => undef,
+        
+        settings_dir        => "$config_dir/what-i-did",
+        settings_file       => "$config_dir/what-i-did/settings.conf",
+        alive_file          => "$config_dir/what-i-did/alive",
+    }, $class;
+
+    return $self;
+}
+
+#---------------------------------------------------------------------------
+# Mainprogram control logic
+#---------------------------------------------------------------------------
+
+sub init {
+    my $self = shift;
+    
+    $self->read_settings;
+
+    $self->set_standard_items({
+        "finished"      => $self->get_setting("item-text-finished"),
+        "day-start"     => $self->get_setting("item-text-day-start"),
+        "day-end"       => $self->get_setting("item-text-day-end"),
+        "lunch-time"    => $self->get_setting("item-text-lunch-time"),
+        "phone"         => $self->get_setting("item-text-phone"),
+    });
+    
+    my %standard_texts = reverse %{$self->get_standard_items};
+
+    $standard_texts{PROGRAM_START.""} = "day-start";
+    $standard_texts{PROGRAM_EXIT.""}  = "day-end";
+
+    $self->set_standard_texts(\%standard_texts);
+    
+    1;
+}
+
+sub start {
+    my $self = shift;
+    
+    require Gtk2;
+    require Gtk2::Gdk::Keysyms;
+    require Gtk2::SimpleList;
+
+    Gtk2->init;
+
+    $self->load_icons;
+    $self->build;
+    
+    $self->show_entry_window   if $self->get_once;
+    $self->show_sum_up_dialog  if $self->get_sum_up;
+
+    if ( not $self->single_shot ) {
+        $self->add_day_end_entry_from_alive_file
+            if $self->get_setting("log-program-start-exit");
+        $self->add_wid_entry(PROGRAM_START)
+            if $self->get_setting("log-program-start-exit");
+        $self->start_monitor_screensaver
+            if $self->get_setting("monitor-screensaver");
+        $self->touch_alive_file;
+        Glib::Timeout->add(60_000, sub { $self->touch_alive_file; 1 } );
+    }
+    
+    $SIG{INT} = $SIG{TERM} = sub { $self->program_exit };
+
+    Gtk2->main;
+
+    1;
+}
+
+sub single_shot {
+    my $self = shift;
+    return $self->get_once || $self->get_sum_up;
+}
+
+sub program_exit {
+    my $self = shift;
+    
+    $self->add_wid_entry(PROGRAM_EXIT)
+            if $self->get_setting("log-program-start-exit")
+               and not $self->single_shot;
+    
+    $self->stop_monitor_screensaver;
+    
+    Gtk2->main_quit;
+    
+    1;
+}
+
+#---------------------------------------------------------------------------
+# Main GUI
+#---------------------------------------------------------------------------
+
+sub build {
+    my $self = shift;
+
+    if ( not $self->single_shot ) {
+        my $icon = Gtk2::StatusIcon->new_from_stock("wid-program-icon");
+        $icon->set_visible(1);
+        $icon->set_tooltip(__"Tell me what you do...");
+        $icon->signal_connect('popup-menu' => sub { $self->show_menu(@_) } );
+        $icon->signal_connect('activate'   => sub { $self->show_entry_window } );
+
+        my $menu_item;
+        my $menu = Gtk2::Menu->new;
+
+        $menu_item = Gtk2::ImageMenuItem->new_from_stock('gtk-quit');
+        $menu_item->signal_connect ( activate => sub { $self->program_exit } );
+        $menu->append($menu_item);
+
+        $menu_item = Gtk2::SeparatorMenuItem->new;
+        $menu->append($menu_item);
+
+        $menu_item = Gtk2::ImageMenuItem->new_from_stock('gtk-about');
+        $menu_item->signal_connect ( activate => sub { $self->show_about_dialog } );
+        $menu->append($menu_item);
+
+        $menu_item = Gtk2::SeparatorMenuItem->new;
+        $menu->append($menu_item);
+
+        my $prefs_menu_item = $self->build_stock_menu_item("gtk-preferences", __"Preferences");
+        $menu->append($prefs_menu_item);
+
+        $menu_item = $self->build_stock_menu_item("wid-clock", __"Sum up times...");
+        $menu_item->signal_connect ( activate => sub { $self->show_sum_up_dialog } );
+        $menu->append($menu_item);
+
+        $menu_item = $self->build_stock_menu_item("gtk-edit", __"Open activity log...");
+        $menu_item->signal_connect ( activate => sub { $self->open_editor } );
+        $menu->append($menu_item);
+
+        #----
+        my $prefs_menu = Gtk2::Menu->new;
+        $prefs_menu_item->set_submenu($prefs_menu);
+
+        $menu_item = Gtk2::CheckMenuItem->new(
+            __x("Show last {cnt} items above activity entry",
+               cnt => $self->get_setting("top-items-window-cnt"))
+        );
+        $menu_item->set_active(1) if $self->get_setting("show-top-items-window");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("show-top-items-window", $_[0]->get_active);
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(
+            __x("Hide last {cnt} item list when starting to type",
+               cnt => $self->get_setting("top-items-window-cnt"))
+        );
+        $menu_item->set_active(1) if $self->get_setting("hide-top-items-window-on-edit");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("hide-top-items-window-on-edit", $_[0]->get_active);
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::SeparatorMenuItem->new;
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"Log program start and exit");
+        $menu_item->set_active(1) if $self->get_setting("log-program-start-exit");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("log-program-start-exit", $_[0]->get_active);
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"Monitor screensaver");
+        $menu_item->set_active(1) if $self->get_setting("monitor-screensaver");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("monitor-screensaver", $_[0]->get_active);
+            if ( $_[0]->get_active ) {
+                $self->start_monitor_screensaver;
+            }
+            else {
+                $self->stop_monitor_screensaver;
+            }
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+        $menu_item = Gtk2::SeparatorMenuItem->new;
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"When summing up do fuzzy search for automatic selection");
+        $menu_item->set_active(1) if $self->get_setting("auto-multi-select-fuzzy");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("auto-multi-select-fuzzy", $_[0]->get_active);
+            $self->sum_up_selection if $self->get_sum_up_window;
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"Remove colon delimited prefix from text entries in sum-up");
+        $menu_item->set_active(1) if $self->get_setting("remove-prefix-from-text");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("remove-prefix-from-text", $_[0]->get_active);
+            $self->sum_up_selection if $self->get_sum_up_window;
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"Hide items of completely summed up days");
+        $menu_item->set_active(1) if $self->get_setting("set-skip-marker-after-sum-up");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("set-skip-marker-after-sum-up", $_[0]->get_active);
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        $menu_item = Gtk2::CheckMenuItem->new(__"Always round up times to the next quater hour");
+        $menu_item->set_active(1) if $self->get_setting("round-up-summary");
+        $menu_item->signal_connect ( toggled => sub {
+            $self->set_setting("round-up-summary", $_[0]->get_active);
+            1;
+        } );
+        $prefs_menu->append($menu_item);
+
+        #----
+
+        $menu->show_all;
+
+        $self->set_status_icon($icon);
+        $self->set_menu($menu);
+    }
+
+    my $entry_window = Gtk2::Window->new("toplevel");
+    $entry_window->set (
+        decorated          => 0,
+        skip_taskbar_hint  => 1,
+        accept_focus       => 1,
+        window_position    => "mouse",
+        default_width      => $self->get_setting("entry-window-width"),
+        focus_on_map       => 1,
+        accept_focus       => 1,
+    );
+    
+    my $hbox = Gtk2::HBox->new;
+    $entry_window->add($hbox);
+    $hbox->set_spacing(1);
+
+    my $entry = Gtk2::Entry->new;
+
+    my $gtk_tips = Gtk2::Tooltips->new;
+    $self->set_gtk_tips($gtk_tips);
+
+    foreach my $item ( qw/finished day-start day-end lunch-time phone/ ) {
+        my $text = $self->get_standard_items->{$item};
+        my $button = $self->build_stock_button("wid-$item", $text);
+        $hbox->pack_start($button, 0, 1, 0);
+        $button->signal_connect("clicked", sub {
+            if ( $text =~ /:/ ) {
+                $entry->append_text($text." ");
+                $entry->grab_focus;
+                $entry->set_position(length($entry->get_text));
+            }
+            else {
+                $self->add_wid_entry($text);
+                $self->hide_entry_window;
+            }
+        });
+    }
+    
+    $hbox->pack_start($entry, 1, 1, 1);
+
+    $entry->signal_connect(
+        activate => sub {
+            my ($entry) = @_;
+            $self->add_wid_entry($entry->get_text);
+            $self->hide_entry_window;
+        },
+    );
+
+    my $cmp_model = Gtk2::ListStore->new ('Glib::String');
+
+    my $cmp = Gtk2::EntryCompletion->new;
+    $cmp->set_model($cmp_model);
+    $cmp->set_text_column(0);
+    $entry->set_completion($cmp);
+
+    $self->set_entry_window($entry_window);
+    $self->set_entry($entry);
+    $self->set_cmp_model($cmp_model);
+
+    my $top_items_window = Gtk2::Window->new("popup");
+    $top_items_window->set (
+        decorated           => 0,
+        skip_taskbar_hint   => 1,
+        accept_focus        => 1,
+        window_position     => "mouse",
+        default_width       => $self->get_setting("top-items-window-width"),
+        accept_focus        => 0,
+        border_width        => 2,
+    );
+
+    my $top_items_slist = Gtk2::SimpleList->new (
+        nr                      => "text",
+        __("Recent activities") => "text"
+    );
+    $top_items_window->add($top_items_slist);
+
+    $top_items_slist->get_column(0)->set_visible(0);
+
+    $top_items_slist->get_selection->signal_connect (
+        "changed" => sub {
+            my ($idx) = $top_items_slist->get_selected_indices;
+            $self->add_wid_entry($top_items_slist->{data}->[$idx][1])
+                if defined $idx;
+            $self->hide_entry_window;
+            $top_items_slist->unselect($idx)
+                if defined $idx;
+            1;
+        }
+    );
+
+    my $top_items_window_height;
+    $top_items_window->signal_connect("size-allocate", sub {
+        my (undef, $alloc) = @_;
+        $top_items_window_height = $alloc->height;
+        return 1;
+    });
+
+    my ($last_top_items_win_x,
+        $last_top_items_win_y);
+
+    $entry_window->signal_connect("configure-event", sub {
+        my (undef, $conf) = @_;
+        my $entry_win_x = $conf->x;
+        my $entry_win_y = $conf->y;
+        my $entry_win_height = $conf->height;
+
+        my ($entry_x, $entry_y) = $self->get_entry->window->get_origin;
+
+        my $win_height = $top_items_window_height;
+
+        my $win_x = $entry_x;
+        my $win_y =
+            $entry_win_y > $win_height ?
+                $entry_y - $win_height :
+                $entry_y + $entry_win_height - 4;
+# print "entry_y=$entry_y win_height=$win_height win_y=$win_y entry_win_height=$entry_win_height\n";
+        
+        $top_items_window->move($win_x,$win_y);
+        $last_top_items_win_x = $win_x;
+        $last_top_items_win_y = $win_y;
+    });
+
+    $entry->signal_connect_after(
+        key_release_event => sub {
+            my ($entry, $event) = @_;
+            $self->hide_entry_window
+                if $event->keyval == $Gtk2::Gdk::Keysyms{Escape};
+            if ( $self->get_setting("show-top-items-window") ) {
+                if ( $entry->get_text eq '' ) {
+                    $self->get_top_items_window->show;
+                    $top_items_window->move($last_top_items_win_x,$last_top_items_win_y);
+                }
+                elsif ( $self->get_setting("hide-top-items-window-on-edit") ) {
+                    $self->get_top_items_window->hide;
+                }
+            }
+            0;
+        },
+    );
+
+    $self->set_top_items_slist($top_items_slist);
+    $self->set_top_items_window($top_items_window);
+
+    $self->init_completion;
+
+    1;
+}
+
+sub init_completion {
+    my $self = shift;
+
+    my $standard_texts = $self->get_standard_texts;
+    
+    my (undef, $top_items, $all_items) = $self->read_wid_file;
+
+    my $cmp_model = $self->get_cmp_model;
+    $cmp_model->clear;
+    $cmp_model->set ($cmp_model->append, 0, $_) for @{$all_items};
+
+    @{$self->get_top_items_slist->{data}} = @{$top_items};
+
+    $self->set_last_wid_file_size(-s $self->get_filename);
+    
+    1;
+}    
+
+sub add_cmp_entry {
+    my $self = shift;
+    my ($text) = @_;
+
+    return if $self->get_standard_texts->{$text};
+
+    my $cmp_model = $self->get_cmp_model;
+    my $text_found = 0;
+
+    $cmp_model->foreach(sub{
+        $text_found=1,return 1 if $cmp_model->get($_[2], 0) eq $text;
+        return 0;
+    });
+
+    $cmp_model->set ($cmp_model->append, 0, $text)
+        unless $text_found;
+
+    1;    
+}
+
+sub show_menu {
+    my $self = shift;
+    my ($widget, undef, $time) = @_;
+
+    my $icon = $self->get_status_icon;
+    my $menu = $self->get_menu;
+    
+    $menu->popup(undef, undef, sub {
+        return Gtk2::StatusIcon::position_menu($menu, $icon)
+    }, undef, 0, $time );
+
+    1;
+}
+
+sub show_entry_window {
+    my $self = shift;
+    
+    if ( $self->get_entry_window->visible ) {
+        $self->hide_entry_window;
+        return;
+    }
+
+    $self->init_completion
+        if -s $self->get_filename != $self->get_last_wid_file_size;
+
+    $self->get_top_items_window->show_all
+        if $self->get_setting("show-top-items-window");
+
+    $self->get_entry->set_text("");
+    $self->get_entry_window->show_all;
+    $self->get_entry_window->present;
+    $self->get_entry->grab_focus;
+
+    1;
+}
+
+sub hide_entry_window {
+    my $self = shift;
+    
+    $self->get_entry_window->hide;
+    $self->get_top_items_window->hide;
+
+    $self->program_exit   if $self->get_once;
+    $self->refresh_sum_up if $self->get_sum_up_window;
+    1;
+}
+
+sub open_editor {
+    my $self = shift;
+    
+    my $cmd      = $self->get_show_cmd;
+    my $filename = $self->get_filename;
+    
+    if ( $cmd !~ s/\{file\}/$filename/ ) {
+        $cmd .= " $filename";
+    }
+    
+    system("$cmd &");
+    
+    1;
+}
+
+sub show_about_dialog {
+    my $self = shift;
+
+    my $about = Gtk2::AboutDialog->new;
+
+    $about->set (
+        name      => "what-i-did",
+	version   => $WhatIdid::VERSION,
+        copyright => '(C) 2008 Jörn Reder, All Rights Reserved',
+        authors   => "Jörn Reder <joern\@zyn.de> (Main developer)\n".
+                     "Gert Brinkmann <g111\@netcologne.de> (KDE support)\n",
+        license   => "This program is free software; you can redistribute it\n".
+                     "and/or modify it under the same terms as Perl itself.",
+    );
+
+    $about->run;
+    $about->destroy;
+    
+    1;
+}
+
+#---------------------------------------------------------------------------
+# Time sum up GUI
+#---------------------------------------------------------------------------
+
+sub show_sum_up_dialog {
+    my $self = shift;
+    
+    if ( $self->get_sum_up_window ) {
+        $self->refresh_sum_up;
+        $self->get_sum_up_window->present;
+        return;
+    }
+
+    my $gtk_tips = $self->get_gtk_tips;
+
+    my $window = Gtk2::Window->new;
+
+    $window->set (
+        title           => __"Sum-up",
+        window_position => "mouse",
+        default_width   => 580,
+        default_height  => 400,
+    );
+
+    $window->signal_connect (
+        "destroy"   => sub { $self->close_sum_up_dialog },
+    );
+
+    my $vbox = Gtk2::VBox->new;
+    $window->add($vbox);
+
+    my $sw = Gtk2::ScrolledWindow->new;
+    $vbox->pack_start($sw, 1, 1, 0);
+
+    $sw->set_policy("automatic", "automatic");
+
+    my $slist = Gtk2::SimpleList->new (
+        __('Date')       => 'text',
+        __('Time')       => 'text',
+        ''               => 'pixbuf',
+        __('Activity')   => 'text',
+        __('Seconds')    => 'int',
+    );
+
+    if ( 0 ) {
+        $slist->set_column_editable(3, 1);
+        $slist->get_model->signal_connect("row-changed", sub {
+            $self->sum_up_selection;
+            1;
+        });
+    }
+
+    $slist->get_column(4)->set_visible(0);
+    $sw->add($slist);
+
+    $slist->get_selection->set_mode ('multiple');
+    $slist->get_selection->signal_connect (
+        "changed" => sub { $self->sum_up_selection }
+    );
+
+    my $hbox = Gtk2::HBox->new;
+    $vbox->pack_start($hbox, 0, 1, 0);
+    
+    my $label = Gtk2::Label->new();
+    $label->set_markup(" <b>Summe</b>");
+    $hbox->pack_start($label, 0, 1, 0);
+    
+    my $sum = Gtk2::Entry->new;
+    $sum->set_size_request(48, -1);
+    $hbox->pack_start($sum, 0, 1, 0);
+
+    $gtk_tips->set_tip($sum, __"Total of selected items");
+
+    $sum->signal_connect("button-release-event", sub {
+        my ($entry) = @_;
+        $entry->select_region(0, length($entry->get_text));
+        1;
+    });
+
+    my $minutes = Gtk2::Label->new();
+    $hbox->pack_start($minutes, 0, 1, 0);
+
+    my $auto_multi_select_button = $self->build_stock_toggle_button(
+        "wid-auto-multi",
+        __"Automatically select similar entries"
+    );
+
+    $auto_multi_select_button->signal_connect("toggled", sub {
+        my ($but) = @_;
+        $self->set_setting("auto-multi-select", $but->get_active);
+        $self->sum_up_selection;
+        1;
+    });
+
+    $auto_multi_select_button->set_active($self->get_setting("auto-multi-select"));
+
+    $hbox->pack_start($auto_multi_select_button, 0, 1, 0);
+
+    my $info = Gtk2::Entry->new;
+    $hbox->pack_start($info, 1, 1, 0);
+
+    $gtk_tips->set_tip($info, __"Text of the first selected item");
+
+    $info->signal_connect("button-release-event", sub {
+        my ($entry) = @_;
+        $entry->select_region(0, length($entry->get_text));
+    });
+
+    my $button = $self->build_stock_button("gtk-delete", __"Remove selected items");
+    $hbox->pack_start($button, 0, 1, 0);
+    $button->signal_connect("clicked" => sub { $self->remove_sum_entries });
+
+    $button = $self->build_stock_button("gtk-add", __"Add new item");
+    $hbox->pack_start($button, 0, 1, 0);
+    $button->signal_connect("clicked" => sub { $self->show_entry_window(@_) });
+
+    $button = $self->build_stock_button("gtk-refresh", __"Refresh list from log file");
+    $hbox->pack_start($button, 0, 1, 0);
+    $button->signal_connect("clicked" => sub { $self->refresh_sum_up } );
+
+    $button = $self->build_stock_button("gtk-close", __"Close dialog");
+    $hbox->pack_start($button, 0, 1, 0);
+    $button->signal_connect("clicked" => sub { $self->close_sum_up_dialog });
+
+    @{$slist->{data}} = @{$self->read_wid_file};
+
+    $window->show_all;
+
+    $self->set_sum_up_window($window);
+    $self->set_sum_up_slist($slist);
+    $self->set_sum_up_entry($sum);
+    $self->set_sum_up_minutes_label($minutes);
+    $self->set_sum_info_entry($info);
+
+    $slist->select(0);
+
+    1;
+}
+
+sub close_sum_up_dialog {
+    my $self = shift;
+    
+    $self->get_sum_up_window->destroy;
+
+    $self->set_sum_up_window(undef);
+    $self->set_sum_up_slist(undef);
+    $self->set_sum_up_entry(undef);
+    $self->set_sum_info_entry(undef);
+    $self->set_sum_removed_entries({});
+
+    $self->program_exit if $self->get_sum_up;
+    
+    1;
+}
+
+sub sum_up_selection {
+    my $self = shift;
+    
+    return if $self->get_in_sum_up;
+    
+    my $slist = $self->get_sum_up_slist;
+    my $data  = $slist->{data} or return;
+    my $rows  = @{$data};
+    my @sel   = $slist->get_selected_indices;
+
+    if ( @sel == 1 and $self->get_setting("auto-multi-select") ) {
+        my $fuzzy = $self->get_setting("auto-multi-select-fuzzy");
+        my $info_text = $data->[$sel[0]]->[DESC];
+        my $info_text_qm = quotemeta($info_text);
+        my $date = $data->[$sel[0]]->[DATE];
+        my @new_sel;
+        my $idx = 0;
+        foreach my $row ( @{$data} ) {
+            if ( $row->[DATE] eq $date and
+                 ($fuzzy ? $row->[DESC] =~ /^$info_text_qm/ : $row->[DESC] eq $info_text ) ) {
+                push @new_sel, $idx;
+            }
+            ++$idx;
+        }
+        $self->set_in_sum_up(1);
+        $slist->get_selection->unselect_all;
+        $slist->select (@new_sel);
+        $self->set_in_sum_up(0);
+        @sel = @new_sel;
+    }
+
+    my $seconds;
+    my %info_text;
+    foreach my $idx ( @sel ) {
+        $seconds += $data->[$idx]->[SECS];
+        $info_text{$data->[$idx]->[DESC]} = 1 unless $data->[$idx]->[DESC] =~ /^-+$/;
+        unless ( $idx+1 < $rows and $data->[$idx]->[DATE] !~ /^-+$/ ) {
+            $slist->unselect($idx);
+        }
+    }
+
+    my $add_round_seconds = $self->get_setting("round-up-summary") ? 899 : 450;
+    
+    my $qh       = int(($seconds+$add_round_seconds) / 900);
+    my $duration = sprintf("%.2f", $qh/4);
+    $duration =~ tr/,/./;
+
+    my $hh_mm = $self->seconds_to_hhmm($seconds);
+
+    $self->get_sum_up_entry->set_text($duration);
+    $self->get_sum_up_minutes_label->set_text($hh_mm);
+    $self->get_sum_info_entry->set_text($self->calc_selected_text(\%info_text));
+
+    1;    
+}
+
+sub calc_selected_text {
+    my $self = shift;
+    my ($info_href) = @_;
+    
+    my @entries = sort keys %{$info_href};
+    return "" unless @entries;
+
+    return join("; ", sort @entries)
+        unless $self->get_setting("remove-prefix-from-text");
+    
+    return join("; ", map { s/^[^:]+:\s+//; $_ } @entries);
+}
+
+sub get_selected_entries {
+    my $self = shift;
+
+    my $slist = $self->get_sum_up_slist;
+    my $data  = $slist->{data};
+    my $rows  = @{$data};
+    my @sel   = $slist->get_selected_indices;
+
+    my %selection;
+    foreach my $idx ( @sel ) {
+        $selection{$data->[$idx]->[DATE].":".$data->[$idx]->[TIME]} = 1;
+    }
+
+    return \%selection;
+}
+
+sub refresh_sum_up {
+    my $self = shift;
+
+
+    my $slist = $self->get_sum_up_slist;
+    my @sel   = $slist->get_selected_indices;
+
+    my $selection = $self->get_selected_entries;
+    my $wid_data  = $self->read_wid_file;
+
+    #-- workaround for a crash with @{$slist->{data}} = ()
+    delete $slist->{data}->[0] for 1..@{$slist->{data}};
+
+    @{$slist->{data}} = @{$wid_data};
+    
+    my $idx = 0;
+    @sel = ();
+    foreach my $row ( @{$slist->{data}} ) {
+        if ( $selection->{$row->[DATE].":".$row->[TIME]} ) {
+            push @sel, $idx;
+        }
+        ++$idx;
+    }
+    
+    $slist->select(@sel);
+
+    1;
+}
+
+sub remove_sum_entries {
+    my $self = shift;
+
+    my $selection = $self->get_selected_entries;
+    my $removed_entries = $self->get_sum_removed_entries;
+
+    foreach my $key ( keys %{$selection} ) {
+        $removed_entries->{$key} = 1;
+    }
+
+    my $slist = $self->get_sum_up_slist;
+    my @sel   = $slist->get_selected_indices;
+    
+    $slist->get_selection->unselect_all;
+    
+    foreach my $idx ( reverse @sel ) {
+        splice @{$slist->{data}}, $idx, 1;
+    }
+
+    while ( $slist->{data}->[0][DATE] =~ /^-+$/ ) {
+        splice @{$slist->{data}}, 0, 1;
+        $self->set_skip_marker_in_wid_file(
+            $slist->{data}->[0][DATE],
+            $slist->{data}->[0][TIME]
+        ) if $slist->{data}->[0] and
+             $self->get_setting("set-skip-marker-after-sum-up");
+    }
+
+    $slist->select(0);
+
+    1;
+}
+
+#---------------------------------------------------------------------------
+# GUI builder helper methods
+#---------------------------------------------------------------------------
+
+sub build_stock_button {
+    my $self = shift;
+    my ($stock, $tip) = @_;
+
+    my $image = Gtk2::Image->new_from_stock($stock,"small-toolbar");
+    my $button = Gtk2::Button->new;
+    $button->add($image);
+
+    my $gtk_tips = $self->get_gtk_tips;
+    $gtk_tips->set_tip($button, $tip);
+
+    return $button;
+}
+
+sub build_stock_toggle_button {
+    my $self = shift;
+    my ($stock, $tip) = @_;
+
+    my $image = Gtk2::Image->new_from_stock($stock,"small-toolbar");
+    my $button = Gtk2::ToggleButton->new;
+    $button->add($image);
+
+    my $gtk_tips = $self->get_gtk_tips;
+    $gtk_tips->set_tip($button, $tip);
+
+    return $button;
+}
+
+sub build_stock_menu_item {
+    my $self = shift;
+    my ($stock, $label) = @_;
+
+    my $image = Gtk2::Image->new_from_stock($stock,"small-toolbar");
+    my $menu_item = Gtk2::ImageMenuItem->new_with_label($label);
+    $menu_item->set_image($image);
+
+    return $menu_item;
+}
+
+#---------------------------------------------------------------------------
+# Icon handling
+#---------------------------------------------------------------------------
+
+sub load_icons {
+    my $self = shift;
+    
+    my $icon_factory = Gtk2::IconFactory->new;
+    $icon_factory->add_default;
+
+    my $dir = $self->get_settings_dir."/.data/gfx";
+    foreach my $filename ( glob("$dir/*.png") ) {
+        my $name = basename($filename);
+        my $custom_file = $self->get_settings_dir."/$name";
+        $filename = $custom_file if -f $custom_file;
+
+        my $pixbuf   = Gtk2::Gdk::Pixbuf->new_from_file($filename);
+        my $icon_set = Gtk2::IconSet->new_from_pixbuf($pixbuf);
+
+        $name =~ s/\.png$//;
+
+        $icon_factory->add( "wid-$name", $icon_set );
+
+        $self->get_icon_pixbufs->{$name} = 
+            $pixbuf->scale_simple(16, 16, "hyper");
+    }
+    
+    1;
+}
+
+sub get_pixbuf_of_text {
+    my $self = shift;
+    my ($text) = @_;
+    my $icon_name = $self->get_standard_texts->{$text};
+    return
+        $self->get_icon_pixbufs->{$icon_name} ||
+        $self->get_icon_pixbufs->{"clock"};
+}
+
+#---------------------------------------------------------------------------
+# Handle "What i did" entries
+#---------------------------------------------------------------------------
+
+sub add_wid_entry {
+    my $self = shift;
+    my ($text, $time) = @_;
+
+    return if $text eq '';
+
+    my $filename = $self->get_filename; 
+
+    if ( not -e $filename ) {
+        open (my $fh, ">", $filename) or die "can't write $filename";
+        close $fh;
+    }
+    
+    open (my $fh, "+<", $filename) or die "can't open $filename";
+    my $last_entry;
+    while (<$fh>) {
+        $last_entry = $_;
+    }
+    
+    my ($last_day, $last_time) = $last_entry =~ /^([^·]+)\s+·\s*([\d:]+)/;
+
+    if ( $last_day ne $self->get_day($time) ) {
+        print $fh "-" x 80,"\n" if $last_entry !~ /^-+/;
+    }
+    
+    print $fh $self->get_timestamp($time)."\t".$text."\n";
+    
+    close $fh;
+
+    1;
+}
+
+sub update_last_entry {
+    my $self = shift;
+    my ($fh, $last_entry, $last_day, $last_time, $next_time) = @_;
+    
+    $next_time ||= time;
+
+    seek ($fh, -length($last_entry), 2);
+    
+    my ($hour, $min) = split(":", $last_time);
+    my ($mday, $mon, $year) = split(/\./, $last_day);
+
+    $mon--;
+    $year-=1900;
+
+    my $last_unix_time = timelocal(0, $min, $hour, $mday, $mon, $year);
+    
+    my $seconds = $next_time - $last_unix_time;
+    my $qh      = int(($seconds+450) / 900);
+
+    my $duration = sprintf("%.2f", $qh/4);
+    $duration =~ tr/,/./;
+
+    $last_entry =~ s/\t\.\.\.\.\t/\t$duration\t/;
+    
+    print $fh $last_entry;
+    
+    1;
+}
+
+sub read_wid_file {
+    my $self = shift;
+
+    my $filename = $self->get_filename; 
+
+    my $removed_entries = $self->get_sum_removed_entries;
+
+    open (my $fh, "<", $filename) or return ([],[]);
+    my @entries;
+    my @all_text_entries;
+    my $first = 1;
+    my $last_was_line = 0;
+    while (<$fh>) {
+        if ( /^([^·]+)\s+·\s+([:\d]+)\s+(.*)/ ) {
+            my ($date, $time, $text) = ($1, $2, $3);
+            my $pixbuf = $self->get_pixbuf_of_text($text);
+            push @all_text_entries, $text if $text ne '';
+            push @entries, [ $date, $time, $pixbuf, $text ];
+            $first = 0;
+            $last_was_line = 0;
+        }
+        elsif ( /^-+$/ ) {
+            if ( not $first and not $last_was_line ) {
+                push @entries, [ "----------", "-------------", undef, "-"x50 ];
+            }
+            $last_was_line = 1;
+        }
+        elsif ( /^\s*=/ ) {
+            @entries = ();
+            $last_was_line = 1;
+        }
+    }
+    close $fh;
+
+    my $rows = @entries;
+    my @removed;
+    for ( my $idx=0; $idx < $rows; ++$idx) {
+        if ( $idx+1 < $rows and $entries[$idx]->[DATE] !~ /^-+$/ ) {
+            $entries[$idx][SECS] =
+                abs($self->calc_entry_duration($entries[$idx], $entries[$idx+1]));
+            $entries[$idx]->[TIME] .= " - ".$entries[$idx+1]->[TIME]
+                unless $entries[$idx+1]->[TIME] =~ /^-+$/;
+        }
+        else {
+            $entries[$idx][SECS] = 0;
+        }
+        if ( $removed_entries->{$entries[$idx][DATE].":".$entries[$idx][TIME]} ) {
+            push @removed, $idx;
+        }
+    }
+    
+    splice(@entries, $_, 1) for reverse @removed;
+
+    #-- Very perlish obfuscated code to remove double line entries ;)
+    my $last_was_line;
+    @entries = grep { $_->[DATE] !~ /^-+$/ ? ( $last_was_line=0, 1) :
+                      $last_was_line    ? 0 : ($last_was_line = 1) } @entries;
+
+
+    #-- Append line entry unless it's there already
+    if ( @entries and $entries[-1][DATE] !~ /^-+$/ ) {
+        push @entries, [ "----------", "-------------", undef, "-"x50 ];
+    }
+
+    #-- Grab list of last 16 unique items from the file
+    my %seen;
+    my $standard_texts = $self->get_standard_texts;
+
+    @all_text_entries =
+        reverse
+        grep { $seen{$_}++; $seen{$_} == 1 && !$standard_texts->{$_} }
+        reverse
+        @all_text_entries;
+
+    my $cnt = $self->get_setting("top-items-window-cnt");
+
+    my @top_text_entries = 
+        @all_text_entries > $cnt ?
+            @all_text_entries[-$cnt .. -1] :
+            @all_text_entries;
+
+    my $nr = 0;
+    @top_text_entries = map { [++$nr.".",$_] } sort {lc($a) cmp lc($b)} @top_text_entries;
+
+    return \@entries, \@top_text_entries, \@all_text_entries if wantarray;
+    return \@entries;
+}
+
+sub last_wid_entry_is_day_end {
+    my $self = shift;
+    
+    my $filename = $self->get_filename;
+    open (my $fh, "<", $filename) or return;
+    my $last_entry;
+    while (<$fh>) {
+        $last_entry = $_;
+    }
+    close $fh;
+
+    my $day_end = quotemeta(PROGRAM_EXIT)."|".
+                  quotemeta($self->get_standard_items->{"day-end"});
+
+    return $last_entry =~ /^([^·]+)\s+·\s+([:\d]+)\s+(?:[.\d]+\s+)?(?:$day_end)/
+
+}
+
+sub get_day {
+    my $self = shift;
+    my ($time) = @_;
+    
+    $time ||= time;
+
+    my @d = localtime($time);
+    
+    my $day  = sprintf("%02d", $d[3]);
+    my $mon  = sprintf("%02d", $d[4]+1);
+    my $year = sprintf("%04d", $d[5]+1900);
+    
+    return __x(
+        "{month}/{day}/{year}",
+        day     => $day,
+        month   => $mon,
+        year    => $year
+    );
+}
+
+sub get_timestamp {
+    my $self = shift;
+    my ($time) = @_;
+    
+    $time ||= time;
+
+    my @d = localtime($time);
+    
+    return $self->get_day($time)." · ".
+           sprintf("%02d:%02d",$d[2], $d[1]);
+}
+
+
+sub calc_entry_duration {
+    my $self = shift;
+    my ($first, $second) = @_;
+
+    return 0 if $first->[DATE] =~ /^-+$/ or $second->[DATE] =~ /^-+$/;
+
+    my $first_time  = $self->time_seconds($first->[TIME]);
+    my $second_time = $self->time_seconds($second->[TIME]);
+
+    return $second_time - $first_time;
+}
+
+sub time_seconds {
+    my $self = shift;
+    my ($time) = @_;
+    
+    my ($hh, $mm) = split(/[:.]/, $time);
+    
+    return $hh*3600+$mm*60;
+}
+
+sub seconds_to_hhmm {
+    my $self = shift;
+    my ($seconds) = @_;
+    my $hh = int($seconds/3600);
+    my $mm = int(($seconds-$hh*3600)/60);
+    return sprintf("%02d:%02d", $hh, $mm);
+}
+
+sub set_skip_marker_in_wid_file {
+    my $self = shift;
+    my ($date, $time) = @_;
+
+    $time =~ s/\s+.*//; # remove end time
+
+    $date = quotemeta($date);
+    $time = quotemeta($time);
+
+    my $filename = $self->get_filename;
+    open (my $fh, "+<", $filename) or return;
+    my $last_line;
+    while (<$fh>) {
+        if ( /^$date\s+·\s+$time/ and $last_line =~ /^-+$/ ) {
+            seek($fh, -(length($_)+length($last_line)), 1);
+            print $fh "=" x (length($last_line)-1),"\n";
+        }
+        $last_line = $_;
+    }
+    close $fh;
+    
+    1;
+}
+
+#---------------------------------------------------------------------------
+# Handle settings
+#---------------------------------------------------------------------------
+
+sub get_setting {
+    my $self = shift;
+    my ($name) = @_;
+    return $self->{settings}->{$name};
+}
+
+sub set_setting {
+    my $self = shift;
+    my ($name, $value) = @_;
+    $self->{settings}->{$name} = $value;
+    $self->write_settings;
+    return $value;
+}
+
+sub read_settings {
+    my $self = shift;
+    
+    my $file = $self->get_settings_file;
+    my $dir  = dirname($file);
+    if ( not -d $dir ) {
+        mkdir $dir, 0755 or die "can't mkdir '$dir'";
+    }
+    
+    $self->write_settings, return if not -f $file;
+    
+    open (my $fh, $file) or die "can't read $file";
+    my $data = do { local $/=undef; <$fh> };
+    close $fh;
+    
+    my $user_settings = eval $data;
+    die "Can't read settings: $@" if $@;
+    
+    my $settings = $self->get_settings;
+    my $changed  = keys %{$user_settings} != keys %{$settings};
+
+    for my $key ( keys %{$user_settings} ) {
+        if ( $settings->{$key} ne $user_settings->{$key} ) {
+            $changed = 1;
+            $settings->{$key} = $user_settings->{$key};
+        }
+    }
+
+    $self->write_settings if $changed;
+    
+    1;
+}
+
+sub write_settings {
+    my $self = shift;
+
+    my $file = $self->get_settings_file;
+    my $dd = Data::Dumper->new([$self->get_settings],["WID_SETTINGS"]);
+    $dd->Indent(1);
+    $dd->Sortkeys(1);
+    my $data = $dd->Dump;
+    $data =~ s/^.*?WID_SETTINGS\s+=\s+//;
+    $data =~ s/;$//;
+    open (my $fh, ">", $file) or die "can't write $file";
+    print $fh $data;
+    close $fh;
+    
+    1;
+}
+
+#---------------------------------------------------------------------------
+# Handle abnormal program exit without a "day-end" entry
+#---------------------------------------------------------------------------
+
+sub touch_alive_file {
+    my $self = shift;
+    my $file = $self->get_alive_file;
+    open (my $fh, ">", $file) or die "can't write $file";
+    close $fh;
+    1;
+}
+
+sub add_day_end_entry_from_alive_file {
+    my $self = shift;
+
+    my $file = $self->get_alive_file;
+    return unless -f $file;
+
+    return if $self->last_wid_entry_is_day_end;
+
+    $self->add_wid_entry(PROGRAM_EXIT, (stat $file)[9]);
+
+    1;
+}
+
+#---------------------------------------------------------------------------
+# Monitor idle sessions through dbus / screensaver
+#---------------------------------------------------------------------------
+
+sub start_monitor_screensaver {
+    my $self = shift;
+    
+    my $cmd =
+        qq[echo DBUS_PID=\$\$; exec dbus-monitor --session ].
+        #-- Gnome
+        qq["type='signal',interface='org.gnome.ScreenSaver',member='SessionIdleChanged'" ].
+        qq["type='signal',interface='org.gnome.ScreenSaver',member='ActiveChanged'" ].
+        #-- KDE 4
+        qq["type='signal',interface='org.freedesktop.ScreenSaver',member='ActiveChanged'" ];
+
+    my $pid = open (my $fh, "$cmd 2>&1 |") or return;
+    
+    Glib::IO->add_watch(fileno($fh), ['in','err','hup'], sub {
+        my $buffer;
+
+        if ( !sysread($fh, $buffer, 16384) ) {
+            close $fh;
+            $self->set_screen_monitor_pid();
+            return 0;
+        }
+
+        if ( $buffer =~ /DBUS_PID=(\d+)/ ) {
+            $self->set_screen_monitor_pid($1);
+        }
+
+        if ( $buffer =~ /^\s+boolean\s+(false|true)/m ) {
+            if ( $1 eq 'true' ) {
+                $self->screen_is_idle;
+            }
+            else {
+                $self->screen_is_active;
+            }
+        }
+
+        1;
+    });
+    
+    $self->set_screen_monitor_pid($pid);
+    
+    1;
+}
+
+sub stop_monitor_screensaver {
+    my $self = shift;
+    
+    kill 15, $self->get_screen_monitor_pid
+        if $self->get_screen_monitor_pid;
+
+    $self->set_screen_monitor_pid();
+
+    1;
+}
+
+sub screen_is_idle {
+    my $self = shift;
+
+    $self->set_screen_idle_time(time);
+
+    1;
+}
+
+sub screen_is_active {
+    my $self = shift;
+
+    if ( $self->get_screen_idle_time and
+         $self->get_day($self->get_screen_idle_time) ne $self->get_day(time) ) {
+
+        #-- new day
+        if ( not $self->last_wid_entry_is_day_end ) {
+            $self->add_wid_entry(
+                $self->get_standard_items->{"day-end"},
+                $self->get_screen_idle_time
+            );
+        }
+
+        $self->add_wid_entry($self->get_standard_items->{"day-start"});
+    }
+    
+    1;
+}
+
+1;
+
+#---------------------------------------------------------------------------
+# Embedded resource files (Base64 encoded)
+#---------------------------------------------------------------------------
+
+__DATA__
+%File: gfx/day-end.png
+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
+%End
+%File: gfx/day-start.png
+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
+b5X/5fE/dKYzF83xyP8AAAAASUVORK5CYII=
+%End
+%File: gfx/finished.png
+iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAABHNCSVQICAgIfAhkiAAAAAlwSFlz
+AAAMJgAADCYBNvTguwAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAOCSURB
+VGiB7VnPSxtBFH5vdlM3vUToof6AhEDw4L8Q7+tF8JKDIHjzJr3kWBDUm7de7KVooYKghxSEeBTs
+rXePlnqpUCRVitlkM/N6yE462cxLUQ+blH3w2GHevjffN/PmzWyCRATjLCJpAM+VlEDS4nKG4+Pj
+xdvb24rNJoRQ6+vr3znfWq32+ubm5qXNViwWf/u+/9NmC4JAHBwcFLi4s7Oz75eWlr72dRKRVbe2
+tr4AANl0YmKChonv+1Y/AKC1tTXWr9FosH4AQHt7ex/iOMc+hVICSUtKIGkZewLsOVCtVr9tbGyU
+bbZ2uw2Tk5Ns0MPDQzg6OrLaarUa65vL5aDRaLBxPc8bOHtYAtlsVmWzWastCAK4u7tjB3IcZyjB
+Yb7D/ABAxTvGPoVSAklLSiBpQe6T8uTkpH56erpos7muCwsLC2zQq6sruL6+ttrm5uZgZmaG9T0/
+P2dtKysr73zff9PXmV6nE5aUQNKSEkha2MtcoVB48H3fastkMnB2dsYGnZ+fZ235fJ71lVICNyYA
+wNTU1MNAJ1dGiegjV+6azebQclev19lSub+/z/rlcrmh5ZmI3qZldNQkJZC0/L8ElBr4/ExcgiBw
+EBHNPus5gIhie3u7tLOzYw3keR40m012oEqlAsvLy1bb6uoq63t/fw+e57Fxd3d3iwDwAhHbRN3v
+gAECiCgAIBOGoWi1WmywYQOFYQicb6fTYX2DIGD9orhOhJkQMSQisqWQAwCCiNBiS1SUUghdfFr7
+90CUX/qlkZNoUoWhA5tYEwAa3X8vexgBBgn07iWxzT5KYt6f+glEO1tFOnJLgIgmvg6AvYxKABDT
+09OfNjc3XaUUEhEqpVC3EREuLy9/SCkxUiGlRKWUUEpBuVx+VSqVJqI0NJeS8vl88+Li4pfjOCSE
+ICEEua6rhBAkpcRqtTolhCBEJETsvYOI5Hne5wh4qMuo9WeVaDNnIoIZo+0afbqtK4Jui+ipN5wm
+YS69nkVpzKaMnrodarCxZ4uIpMZqPcgidm1E1KmkBzPVBK01Dr5vw8UIkEHAjGuS6BgaRuD7Zpz9
+Yav3Qnc1zJmPz7gJXJc3jGmcgG0l4qthEmgRkfVu808CBhEwgNtm3tTHEjDTSadPCAAyPuNPJmAh
+o2fdtYA3c99GAOBvGmkCYQRePgbTkwhYA3VJabAi9tQy8B383PH/APJ74b6EdZaqAAAAAElFTkSu
+QmCC
+%End
+%File: gfx/lunch-time.png
+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
+kAAAAABJRU5ErkJggg==
+%End
+%File: gfx/program-icon.png
+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
+TkSuQmCC
+%End
+%File: gfx/phone.png
+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
+%End
+%File: gfx/clock.png
+iVBORw0KGgoAAAANSUhEUgAAABkAAAAZCAYAAADE6YVjAAAABHNCSVQICAgIfAhkiAAAAAlwSFlz
+AAAGTgAABk4B1pBWuwAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAQASURB
+VEiJtZbdS1t3GMe/z3lJjidvTZbEt8RO8WXQ7aIoZULrWFeYWtZ1C0UpzKtml7vojexyuL9gjMGK
+ZWupK+LFuqHDsqtpGWPdoGWFQUWdxkSNjRrMyUlOzjm/XZiEJCaxMvbAA+f38nw/v+f5vXCIMYb/
+24SXmTRDZCdJ6nO0NI0wxt4g4LfURmxGzuWeDDGWPS6e6mUyG2ge43nLl4Lb7ZBaWtDQ2gqLx4Ns
+PA41GkV2c5Ppyf0XWiYbej8eXzwRZIrI6Qm0zluDbf3+ixdBQu2EDVXF1sN5GLuJ6Ugk+tHHjOWO
+hfzY4usTOMsjz4UBqxwI1BSvtIOlJew/fryvxWI9HzAWrwmZIbLIfl/cNzjkEmw2AIDociGXTL4U
+SEsksPto8flwNNZT2s+VNmxtge/kntdcAKArCk6dPYvXJyZg7+yErijHOidJEP2N3T+1Bz6tCpnz
++d5mjEKS3w9DUWAoCpTlZYAIHeEweEkq9ldzM5OBp68PHeEwjHRuYoao9Ui5Hp4O/mF9taOXl+Wy
+EgRCIbTfuIHks2f4a3wczDTLxkkQ0HjpEoIjI5CamqDt7WFxcBD6zvbkuyv/hIGSe5JLq11WAEY6
+XSaydu8enGfO4JX+fgRHR7E6OXlYAlFE8+XLCF6/DqmxEUzXsTk7i/WpKYAIhpY7X5bJt0TSKacj
+be/qpmobKrpcePP+fVi8Xjy9eRNyWxtOj43B6vXC1DREHzzA2p07yGxvF2PUlRX1vd1duQj5Xhb7
+uQbnr1a/vxoDAODu7cW5u3fBDAOcKMLIZBCZnsbq7dvI7uwcma9ubIBSKfdVxvYFAOAkh5fpOgxF
+qQl5sbCA9akpBEIhLE9OYuXWLWiJRM35zDCgAzYA+8QYwwyRhwQhITqd1QNME6amgXgevCQhl0yC
+E0WQKII4rnpMJqNfVRSxWC4A+MFhV3NpVUJpEGOHp6neS010CKKS7TRNyH5fZHhzqw0oOV2iy7mu
+pZRuVBzRY40xMMM4ypakPwvfxWVzIv/NydTrm5lSvigCS9+uuUb/cjq+0/FfAbZAy/xwJDpUaJft
+2kF854JgsRzN/QRmdToVZSP2YWlfGWSUsZjU2jxOVPVOHmsczzNqaLhyjTG1JgQAhlfXvkp43ddE
+h12tHKtnFo878YsovnNle/sJEVlLx8r2hIhEAHYAti7A+3lz09e0uXWunjhxHEs2+ec+iW19lgYO
+AKTynixoV0KoACn4AND+lst1vsflGJA1rRNK2m7abMmkRVh6mthd+FlRf/8biAFIA1DyvscY06pm
+UpFRASQBsAKw4PBeFUpsANABaACy+dUfAMiwCtG6fyt5IAeAz4vzAAgAy7sBwASg19P5F7MM1u/7
+2D8oAAAAAElFTkSuQmCC
+%End
+%File: gfx/auto-multi.png
+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
+%End
+%File: lib/LocaleData/de/LC_MESSAGES/what-i-did.mo
+3hIElQAAAAAjAAAAHAAAADQBAAAvAAAATAIAAAAAAAAIAwAACAAAAAkDAAAMAAAAEgMAAC0AAAAf
+AwAAJAAAAE0DAAAHAAAAcgMAAAwAAAB6AwAABAAAAIcDAAAIAAAAjAMAAAwAAACVAwAAJwAAAKID
+AAAvAAAAygMAABoAAAD6AwAACgAAABUEAAATAAAAIAQAABQAAAA0BAAACwAAAEkEAAALAAAAVQQA
+AAwAAABhBAAADQAAAG4EAAARAAAAfAQAABoAAACOBAAAOQAAAKkEAAAVAAAA4wQAAAcAAAD5BAAA
+KgAAAAEFAAAPAAAALAUAAAYAAAA8BQAAFgAAAEMFAAAfAAAAWgUAAAQAAAB6BQAAFwAAAH8FAADz
+AgAAlwUAADcAAACLCAAAFAAAAMMIAABZAQAA2AgAAA4AAAAyCgAAGQAAAEEKAAA3AAAAWwoAAC0A
+AACTCgAACwAAAMEKAAARAAAAzQoAAAUAAADfCgAABgAAAOUKAAAJAAAA7AoAAEMAAAD2CgAANwAA
+ADoLAAAmAAAAcgsAAAUAAACZCwAAFwAAAJ8LAAAcAAAAtwsAAAoAAADUCwAADQAAAN8LAAAMAAAA
+7QsAAA0AAAD6CwAAEwAAAAgMAAAcAAAAHAwAADkAAAA5DAAAHAAAAHMMAAAIAAAAkAwAADcAAACZ
+DAAAFgAAANEMAAAMAAAA6AwAABsAAAD1DAAAJQAAABENAAAHAAAANw0AAB4AAAA/DQAAYgMAAF4N
+AAA6AAAAwRAAABQAAAD8EAAAAQAAABAAAAAOAAAAGQAAABoAAAAIAAAABgAAAAsAAAAHAAAAAwAA
+AAAAAAANAAAAHAAAAAAAAAAUAAAAHwAAAA8AAAAgAAAAAAAAAAwAAAAAAAAAEgAAAAAAAAAdAAAA
+EQAAACIAAAAWAAAACQAAABcAAAAAAAAAAAAAAAAAAAAVAAAAIQAAAAAAAAAFAAAAAAAAABgAAAAj
+AAAAAgAAABMAAAAAAAAACgAAABsAAAAeAAAABAAAAAAAAAAAQWN0aXZpdHkAQWRkIG5ldyBpdGVt
+AEFsd2F5cyByb3VuZCB1cCB0aW1lcyB0byB0aGUgbmV4dCBxdWF0ZXIgaG91cgBBdXRvbWF0aWNh
+bGx5IHNlbGVjdCBzaW1pbGFyIGVudHJpZXMAQnllIGJ5ZQBDbG9zZSBkaWFsb2cARGF0ZQBGaW5p
+c2hlZABHb29kIG1vcm5pbmcASGlkZSBpdGVtcyBvZiBjb21wbGV0ZWx5IHN1bW1lZCB1cCBkYXlz
+AEhpZGUgbGFzdCB7Y250fSBpdGVtIGxpc3Qgd2hlbiBzdGFydGluZyB0byB0eXBlAExvZyBwcm9n
+cmFtIHN0YXJ0IGFuZCBleGl0AEx1bmNoIHRpbWUATW9uaXRvciBzY3JlZW5zYXZlcgBPcGVuIGFj
+dGl2aXR5IGxvZy4uLgBQaG9uZSBjYWxsOgBQcmVmZXJlbmNlcwBQcm9ncmFtIGV4aXQAUHJvZ3Jh
+bSBzdGFydABSZWNlbnQgYWN0aXZpdGllcwBSZWZyZXNoIGxpc3QgZnJvbSBsb2cgZmlsZQBSZW1v
+dmUgY29sb24gZGVsaW1pdGVkIHByZWZpeCBmcm9tIHRleHQgZW50cmllcyBpbiBzdW0tdXAAUmVt
+b3ZlIHNlbGVjdGVkIGl0ZW1zAFNlY29uZHMAU2hvdyBsYXN0IHtjbnR9IGl0ZW1zIGFib3ZlIGFj
+dGl2aXR5IGVudHJ5AFN1bSB1cCB0aW1lcy4uLgBTdW0tdXAAVGVsbCBtZSB3aGF0IHlvdSBkby4u
+LgBUZXh0IG9mIHRoZSBmaXJzdCBzZWxlY3RlZCBpdGVtAFRpbWUAVG90YWwgb2Ygc2VsZWN0ZWQg
+aXRlbXMAVXNhZ2U6IHdoYXQtaS1kaWQgW29wdGlvbnNdCgpPcHRpb25zOgogIC0tb25jZSAgICBK
+dXN0IHNob3cgdGhlIGFjdGl2aXR5IGVudHJ5IG9uZSB0aW1lLiBVc2VmdWwgaW4gY29uanVuY3Rp
+b24KICAgICAgICAgICAgd2l0aCBhIGRlc2t0b3AgZW52aXJvbm1lbnQgc2hvcnRjdXQuCgogIC0t
+YWRkPTx0ZXh0PgogICAgICAgICAgICBKdXN0IGFkZCB0aGUgZ2l2ZW4gdGV4dCB0byB0aGUgbG9n
+IGZpbGUgYW5kIGV4aXQgKG5vIEdVSSkuCgogIC0tc3VtICAgICBKdXN0IHNob3cgdGhlIHN1bS11
+cCBkaWFsb2cgb25lIHRpbWUuIENhbid0IGJlIHVzZWQgdG9nZXRoZXIKICAgICAgICAgICAgd2l0
+aCAtLW9uY2UuCgogIC0tZmlsZT08ZmlsZW5hbWU+CiAgICAgICAgICAgIE5hbWUgb2YgdGhlIGxv
+ZyBmaWxlIGZvciB0aGUgcmVjb3JkZWQgYWN0aXZpdGllcy4KICAgICAgICAgICAgICAKICAgICAg
+ICAgICAgRGVmYXVsdDogJEhPTUUvd2hhdC1pLWRpZC50eHQKCiAgLS1zaG93LWNtZD08ZWRpdG9y
+PgogICAgICAgICAgICBOYW1lIG9mIHRoZSBlZGl0b3IgcHJvZ3JhbSB0byBzaG93IHRoZSBhY3Rp
+dml0eSBsb2cgdGV4dAogICAgICAgICAgICBmaWxlLiBGaWxlbmFtZSBpcyBhcHBlbmRlZCBhdXRv
+bWF0aWNhbGx5IHVubGVzcyBhIHtmaWxlfQogICAgICAgICAgICBwbGFjZWhvbGRlciBpcyBmb3Vu
+ZC4KICAgICAgICAgICAgICAKICAgICAgICAgICAgRGVmYXVsdDogbmMKCiAgLS1oZWxwICAgIFNo
+b3cgdGhpcyBoZWxwIHRleHQuCgoAV2hlbiBzdW1taW5nIHVwIGRvIGZ1enp5IHNlYXJjaCBmb3Ig
+YXV0b21hdGljIHNlbGVjdGlvbgB7bW9udGh9L3tkYXl9L3t5ZWFyfQBQcm9qZWN0LUlkLVZlcnNp
+b246IHdoYXQtaS1kaWQgMS4wLjYKUmVwb3J0LU1zZ2lkLUJ1Z3MtVG86IHdoYXQtaS1kaWQgVHJh
+bnNsYXRpb24gVGVhbSA8d2hhdC1pLWRpZC1sYW5nIEFUIGV4aXQxLm9yZz4KUE9ULUNyZWF0aW9u
+LURhdGU6IDIwMDktMTItMTMgMTM6MjcrMDEwMApQTy1SZXZpc2lvbi1EYXRlOiAyMDA5LTEyLTEz
+IDEzOjI4KzAxMDAKTGFzdC1UcmFuc2xhdG9yOiAgPD4KTGFuZ3VhZ2UtVGVhbTogRW5nbGlzaCA8
+ZW5AbGkub3JnPgpNSU1FLVZlcnNpb246IDEuMApDb250ZW50LVR5cGU6IHRleHQvcGxhaW47IGNo
+YXJzZXQ9VVRGLTgKQ29udGVudC1UcmFuc2Zlci1FbmNvZGluZzogOGJpdAoAQmVzY2jDpGZ0aWd1
+bmcATmV1ZW4gRWludHJhZyBoaW56dWbDvGdlbgBBbGxlIFN1bW1lbiBpbW1lciB6dXIgbsOkY2hz
+dGVuIFZpZXJ0ZWxzdHVuZGUgYXVmcnVuZGVuAEdsZWljaGFydGlnZSBFaW50csOkZ2UgYXV0b21h
+dGlzY2ggYXVzd8OkaGxlbgBIZWltIGdlaHQncwBEaWFsb2cgc2NobGllw59lbgBEYXR1bQBGZXJ0
+aWcAR3V0ZW4gVGFnAEVpbnRyw6RnZSBuYWNoIFRhZ2VzYWJzY2hsdXNzIGJlaW0gQXVmc3VtbWll
+cmVuIG5pY2h0IG1laHIgYW56ZWlnZW4AVmVyc3RlY2tlIExpc3RlIGRlciBsZXR6dGVuIHtjbnR9
+IEVpbnRyw6RnZSBiZWltIFRpcHBlbgBQcm9ncmFtbXN0YXJ0IHVuZCAtZW5kZSBwcm90b2tvbGxp
+ZXJlbgBFc3NlbgBTY3JlZW5zYXZlciDDvGJlcndhY2hlbgBMaXN0ZSBtaXQgRWRpdG9yIGF1ZnJ1
+ZmVuLi4uAFRlbGVmb25hdDoARWluc3RlbGx1bmdlbgBQcm9ncmFtbWVuZGUAUHJvZ3JhbW1zdGFy
+dABMZXR6dGUgQWt0aXZpdMOkdGVuAExpc3RlIGF1cyBEYXRlaSBuZXUgZWlubGVzZW4ATWl0IDog
+YWJnZXRyZW5udGVuIFRleHRhbmZhbmcgYmVpbSBBdWZzdW1taWVyZW4gZW50ZmVybmVuAE1hcmtp
+ZXJ0ZSBFaW50csOkZ2UgbMO2c2NoZW4AU2VrdW5kZW4AWmVpZ2UgZGllIGxldHp0ZW4ge2NudH0g
+RWludHLDpGdlIMO8YmVyIGRlbSBFaW5nYWJlZmVsZABaZWl0ZW4gYXVmc3VtbWllcmVuLi4uAEF1
+ZnN1bW1pZXJlbgBFcnrDpGhsJyBtaXIgd2FzIGR1IHR1c3QuLi4AVGV4dCBkZXMgenVlcnN0IGF1
+c2dld8OkaGx0ZW4gUHVua3RlcwBVaHJ6ZWl0AFN1bW1lIGRlciBhdXNnZXfDpGhsdGVuIFB1bmt0
+ZQBVc2FnZTogd2hhdC1pLWRpZCBbLS1vbmNlXSBbLS1zdW1dIFstLWZpbGU9PGZpbGVuYW1lPl0g
+Wy0tc2hvdy1jbWQ9PGVkaXRvcj5dCgpPcHRpb25lbjoKICAtLW9uY2UgICAgRWlubWFsaWdlcyBB
+bnplaWdlbiBkZXMgRXJmYXNzdW5nc2RpYWxvZ3MuIEVpZ25ldCBzaWNoIHp1cgogICAgICAgICAg
+ICBWZXJ3ZW5kdW5nIG1pdCBlaW5lbSBUYXN0YXR1ci1TaG9ydGN1dC4KCiAgLS1hZGQ9PHRleHQ+
+CiAgICAgICAgICAgIERpZXNlbiBUZXh0IHp1ciBEYXRlaSBoaW56dWbDvGdlbiAoa2VpbmUgT2Jl
+cmZsw6RjaGUpLgoKICAtLXN1bSAgICAgRWlubWFsaWdlcyBBbnplaWdlbiBkZXMgRGlhbG9ncyB6
+dW0gQXVmc3VtbWllcmVuLiBLYW5uIG5pY2h0CiAgICAgICAgICAgIHp1c2FtbWVuIG1pdCAtLW9u
+Y2UgdmVyd2VuZGV0IHdlcmRlbi4KCiAgLS1maWxlPTxmaWxlbmFtZT4KICAgICAgICAgICAgTmFt
+ZSBkZXIgRGF0ZWksIGluIGRlciBkaWUgZXJmYXNzdGVuIFplaXRlbiBnZXNwZWljaGVydCB3ZXJk
+ZW4uCiAgICAgICAgICAgICAgCiAgICAgICAgICAgIERlZmF1bHQ6ICRIT01FL3doYXQtaS1kaWQu
+dHh0CgogIC0tc2hvdy1jbWQ9PGVkaXRvcj4KICAgICAgICAgICAgTmFtZSBkZXMgRWRpdG9yLVBy
+b2dyYW1tcyB6dXIgQW56ZWlnZSBkZXIgZXJmYXNzdGVuIFplaXRlbi4KICAgICAgICAgICAgRGVy
+IERhdGVpbmFtZSB3aXJkIGF1dG9tYXRpc2NoIGFuZ2Vow6RuZ3QuIEFsdGVybmF0aXYga2Fubgog
+ICAgICAgICAgICBlaW4ge2ZpbGV9IFBsYXR6aGFsdGVyIHZlcndlbmRldCB3ZXJkZW4uCiAgICAg
+ICAgICAgICAgCiAgICAgICAgICAgIERlZmF1bHQ6IG5jCgogIC0taGVscCAgICBaZWlndCBkaWVz
+ZSBIaWxmZSBhbi4KCgBCZWltIFN1bW1pZXJlbiB1bmdlbmF1IHN1Y2hlbiBmw7xyIGF1dG9tYXRp
+c2NoZXMgTWFya2llcmVuAHtkYXl9Lnttb250aH0ue3llYXJ9AA==
+%End

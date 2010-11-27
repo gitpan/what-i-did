@@ -1,0 +1,77 @@
+$Id: Changes,v 1.3 2009-12-13 12:31:38 joern Exp $
+
+Revision history and release notes for what-i-did:
+
+1.0.9 Sat Nov 27, 2010, joern
+    Bugfixes:
+    - Activities consisting of a plain number didn't
+      show up in the sum up dialog. Thanks for the report
+      to Radim Tobolka <rtobolka AT koukaam.se>.
+    - Screensaver tracking didn't work for newer GNOME
+      version due to internal dbus API changes
+
+1.0.8 Sun Dec 13, 2009, joern
+    First public release on exit1.org
+
+1.0.7 Mon Jul 13, 2009, joern
+    Bugfixes:
+    - Workarounded a crash in Gtk2::SimpleList on
+      reloading the sum up table.
+
+    Features:
+    - Now fully internationalized. Current languages:
+      English and German. Requires libintl-perl.
+    - No "write-duration-to-file" option anymore.
+      Senseless and problematic with i18n due to
+      date parsing issues.
+    - In sum-up dialog text of all selected entries
+      is copied to the text entry (not just the first one).
+    - Option to remove a colon delimited prefix from
+      the items in the sum-up dialog. This way you can
+      easily group items for the same project by giving
+      them the same prefix, without having the prefix
+      repeated in the text entry.
+    - Option to hide all entries of a completely summed
+      up day by modifying the log file and replacing the
+      dashes in the day delimiter to equal signs. All
+      text lines before a line starting with an equal
+      sign are hidden when opening the sum-up dialog.
+    - New --add parameter for adding an activity
+      to the log from the command line.
+    - Moved ~/.what-i-did directory to common
+      ~/.config/what-i-did.
+
+1.0.6 Sun Jun 29, 2008, joern
+    Features:
+    - Some standard activity shortcut buttons
+    - Text completion in activity entry with list of
+      current activites in the log file
+    - Preferences sub menu
+    - Configure whether activity durations should be
+      added to the log or not
+    - Monitor screensaver for automatic day-start and
+      day-end recognition
+    - Determine and log program exit even when killed
+      by signal 9.
+    - Added more tooltips
+    - Sum-up window
+      - Show icons for standard entries
+      - Automatic selection of similar or identic entries
+        (preferences option) in the sum up window
+      - Provide text of selected item in an entry
+        ready for copy'n paste
+
+1.0.5 Thu Mar 13, 2008, joern
+    Bugfixes:
+    - Fixed missing delimiter line when refreshing sum up list.
+
+1.0.3 Sun Feb 24, 2008, joern
+    Features:
+    - Added sum up dialog
+    - Added --once option
+
+1.0.2 Sun Feb 17, 2008, joern
+    First internal release in our company:
+    - Simple tray icon interface: enter activity text which
+      is written to a log file with the current time stamp
+    - Not interlationalized, German user interface.
